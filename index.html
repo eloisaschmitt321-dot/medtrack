@@ -259,7 +259,7 @@ function arred5(m,piso){ return Math.max(piso||15, Math.round(m/5)*5); }
 /* =======================================================================
    2. ARMAZENAMENTO
    ======================================================================= */
-var VERSAO='6.0';
+var VERSAO='6.1';
 var CHAVE='medtrack.v2';
 var PRECISA_REGERAR=false;
 var DADOS_VIERAM_DO_ARQUIVO=false;
@@ -277,10 +277,14 @@ function gravar(v){
 
 var salvarTimer=null;
 var sincTimer=null;
+function salvarJa(){
+  if(salvarTimer){ clearTimeout(salvarTimer); salvarTimer=null; }
+  gravar(JSON.stringify(E));
+}
 function salvar(){
   E.ultimaAlteracao=new Date().toISOString();   /* usado para decidir quem vence na junção */
   if(salvarTimer) clearTimeout(salvarTimer);
-  salvarTimer=setTimeout(function(){ gravar(JSON.stringify(E)); },120);
+  salvarTimer=setTimeout(function(){ salvarTimer=null; gravar(JSON.stringify(E)); },120);
   /* manda para a sala alguns segundos depois da última mexida */
   if(typeof podeSincronizar==='function' && podeSincronizar()){
     if(sincTimer) clearTimeout(sincTimer);
@@ -386,7 +390,7 @@ function estadoInicial(){
       janelaOutras:7, semanasSimulado:2, metaSemanal:26,
       reforcoDificuldade:30, reforcosPorSemana:2,
       redistribuirAuto:true, horizonteRedistribuicao:14, paNoFimDeSemana:true,
-      sincServidor:'https://kvdb.io', sincSala:'', sincAtivo:false,
+      sincServidor:'https://jsonblob.com/api/jsonBlob', sincSala:'', sincAtivo:false,
       limiarRetomada:75, diasRetomada:10, retomadaMinutos:30,
       horario:horario
     },
@@ -2326,6 +2330,9 @@ PAGINAS.config=function(){
      'Cria uma sala na internet só sua. Todo aparelho que entrar na mesma sala passa a mostrar as '+
      'mesmas coisas: o app envia o que você muda e busca o que os outros mudaram, juntando item a item. '+
      'Funciona melhor com o app aberto por um endereço (https). Sem sala, tudo continua offline como antes.</p>'+
+     '<p style="font-size:11px;color:var(--muted);margin-top:-2px;line-height:1.6">A sala é um espaço temporário na '+
+     'internet, sem conta e sem senha — quem tiver o link vê o seu planner. Ela não substitui o backup: '+
+     'use <b>Exportar backup</b> de vez em quando.</p>'+
      '<div class="aviso '+(podeSincronizar()?'inf':'at')+'" id="sinc-status">'+
        (podeSincronizar()
          ? 'Sincronização ligada na sala <b>'+esc(E.config.sincSala)+'</b>.'
@@ -2333,8 +2340,11 @@ PAGINAS.config=function(){
      '</div>'+
      (podeSincronizar()
        ? '<div style="background:var(--surface2);border-radius:12px;padding:12px;margin-bottom:12px">'+
-         '<div style="font-size:11px;color:var(--muted)">Código da sua sala — use este mesmo código no outro aparelho</div>'+
-         '<div style="font-size:20px;font-weight:700;letter-spacing:.04em;word-break:break-all">'+esc(E.config.sincSala)+'</div>'+
+         '<div style="font-size:11px;color:var(--muted)">Código da sua sala</div>'+
+         '<div style="font-size:16px;font-weight:700;letter-spacing:.04em;word-break:break-all;margin-bottom:10px">'+esc(E.config.sincSala)+'</div>'+
+         '<div style="font-size:11px;color:var(--muted)">Link para abrir no outro aparelho — ele entra na sala sozinho</div>'+
+         '<div style="font-size:12px;word-break:break-all;margin-bottom:8px"><a href="'+esc(linkSala())+'">'+esc(linkSala())+'</a></div>'+
+         '<button class="btn mini" data-acao="copiar-link-sala">Copiar link</button>'+
          '</div>'
        : '')+
      '<div style="display:flex;flex-wrap:wrap;gap:6px">'+
@@ -3353,9 +3363,26 @@ function extrairDados(texto){
    ===================================================================== */
 var SINC={ocupado:false,ultimo:null,erro:null};
 
+var SITE_MEDTRACK='https://eloisaschmitt321-dot.github.io/medtrack/';
+
+function servidorSala(){
+  var srv=String(E.config.sincServidor||'').replace(/\/+$/,'');
+  /* o kvdb.io passou a exigir cadastro por e-mail; quem tinha o endereço antigo
+     salvo é migrado sem perder a sala */
+  if(!srv||srv.indexOf('kvdb.io')>=0) srv='https://jsonblob.com/api/jsonBlob';
+  return srv;
+}
+
 function urlSala(){
-  var srv=String(E.config.sincServidor||'https://kvdb.io').replace(/\/+$/,'');
-  return srv+'/'+E.config.sincSala+'/estado';
+  return servidorSala()+'/'+E.config.sincSala;
+}
+
+/* endereço que abre o app já dentro da sala — é o que você manda para o outro
+   aparelho, para não precisar digitar o código na mão */
+function linkSala(){
+  var base=SITE_MEDTRACK;
+  if(location.protocol==='http:'||location.protocol==='https:') base=location.origin+location.pathname;
+  return base+'#sala='+E.config.sincSala;
 }
 
 function podeSincronizar(){
@@ -3371,16 +3398,17 @@ function sincStatus(txt,erro){
 
 /* cria uma sala nova e devolve o código para você usar no outro aparelho */
 function sincCriarSala(){
-  var srv=String(E.config.sincServidor||'https://kvdb.io').replace(/\/+$/,'');
+  var srv=servidorSala();
   sincStatus('Criando sala…');
-  fetch(srv+'/',{method:'POST',body:JSON.stringify({app:'medtrack'})})
+  fetch(srv,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(E)})
     .then(function(r){
-      if(!r.ok) throw new Error('resposta '+r.status);
-      return r.text();
+      if(!r.ok&&r.status!==201) throw new Error('resposta '+r.status);
+      var loc=r.headers.get('Location')||r.headers.get('location')||'';
+      return String(loc).split('/').pop();
     })
     .then(function(txt){
-      var codigo=String(txt).replace(/[^A-Za-z0-9_-]/g,'');
-      if(!codigo) throw new Error('código vazio');
+      var codigo=String(txt||'').replace(/[^A-Za-z0-9_-]/g,'');
+      if(!codigo) throw new Error('o servidor não devolveu o código da sala');
       E.config.sincSala=codigo;
       E.config.sincAtivo=true;
       salvar();
@@ -3398,7 +3426,7 @@ function sincEnviar(silencioso){
   if(!podeSincronizar()||SINC.ocupado) return;
   SINC.ocupado=true;
   if(!silencioso) sincStatus('Enviando…');
-  fetch(urlSala(),{method:'PUT',headers:{'Content-Type':'text/plain'},body:JSON.stringify(E)})
+  fetch(urlSala(),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(E)})
     .then(function(r){
       if(!r.ok) throw new Error('resposta '+r.status);
       sincStatus('Tudo enviado · '+new Date().toLocaleTimeString('pt-BR').slice(0,5));
@@ -3424,7 +3452,11 @@ function sincBuscar(silencioso){
       var vindo=extrairDados(txt);
       if(!vindo){ sincStatus('A sala tem algo que não consegui ler.',true); return; }
       var antes=JSON.stringify(E).length;
+      /* a sala é configuração DESTE aparelho: a junção não pode trazer o
+         endereço/código de outro e derrubar a sincronização no meio do caminho */
+      var meuSrv=E.config.sincServidor, minhaSala=E.config.sincSala, meuAtivo=E.config.sincAtivo;
       E=mesclarEstados(E,vindo);
+      E.config.sincServidor=meuSrv; E.config.sincSala=minhaSala; E.config.sincAtivo=meuAtivo;
       salvar();
       sincStatus('Sincronizado · '+new Date().toLocaleTimeString('pt-BR').slice(0,5));
       render();
@@ -3904,6 +3936,15 @@ document.addEventListener('click',function(ev){
   if(a==='fechar'){ fecharModal(); return; }
 
   if(a==='sinc-criar'){ sincCriarSala(); return; }
+  if(a==='copiar-link-sala'){
+    var lk=linkSala();
+    try{
+      if(navigator.clipboard&&navigator.clipboard.writeText){
+        navigator.clipboard.writeText(lk).then(function(){ flutuante('Link copiado.'); },function(){ prompt('Copie o link:',lk); });
+      }else{ prompt('Copie o link:',lk); }
+    }catch(e){ prompt('Copie o link:',lk); }
+    return;
+  }
   if(a==='sinc-agora'){ sincAgora(); return; }
   if(a==='sinc-sair'){
     E.config.sincAtivo=false; salvar(); render();
@@ -4041,8 +4082,33 @@ document.getElementById('btn-tema-mobile').onclick=function(){
 /* Se o app ficar aberto durante a virada do dia, o que passou a estar atrasado
    é redistribuído sozinho — sem ela precisar recarregar nem clicar em nada. */
 /* busca a cada minuto o que os outros aparelhos mandaram */
+/* Entrar numa sala pelo endereço: .../medtrack/#sala=CODIGO
+   É assim que o segundo aparelho entra sem digitar nada. */
+function salaPelaURL(){
+  var m=String(location.hash||'').match(/sala=([A-Za-z0-9_-]+)/);
+  if(!m) return false;
+  var codigo=m[1];
+  if(E.config.sincSala===codigo&&E.config.sincAtivo){
+    try{ history.replaceState(null,'',location.pathname+location.search); }catch(e){}
+    return false;
+  }
+  E.config.sincSala=codigo;
+  E.config.sincAtivo=true;
+  salvar();
+  try{ history.replaceState(null,'',location.pathname+location.search); }catch(e){}
+  return true;
+}
+
 setInterval(function(){ if(podeSincronizar()) sincBuscar(true); },60000);
 window.addEventListener('focus',function(){ if(podeSincronizar()) sincBuscar(true); });
+
+/* fechar a aba não pode comer a última mexida: grava na hora e tenta avisar a sala */
+window.addEventListener('pagehide',function(){
+  salvarJa();
+  if(podeSincronizar()&&navigator.sendBeacon){
+    try{ navigator.sendBeacon(urlSala(),new Blob([JSON.stringify(E)],{type:'application/json'})); }catch(e){}
+  }
+});
 
 var diaEmTela=hojeISO();
 setInterval(function(){
@@ -4060,6 +4126,7 @@ setInterval(function(){
   /* dados vieram dentro do arquivo: grava já no aparelho novo, para não
      depender de a Eloísa mexer em algo antes de fechar */
   if(DADOS_VIERAM_DO_ARQUIVO) salvar();
+  if(salaPelaURL()) flutuante('Entrando na sala compartilhada…');
   if(podeSincronizar()) sincBuscar(true);
   if(!tem||PRECISA_REGERAR) regenerar(ini,14);
   redistribuirAutomatico();
