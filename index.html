@@ -259,7 +259,7 @@ function arred5(m,piso){ return Math.max(piso||15, Math.round(m/5)*5); }
 /* =======================================================================
    2. ARMAZENAMENTO
    ======================================================================= */
-var VERSAO='6.1';
+var VERSAO='6.2';
 var CHAVE='medtrack.v2';
 var PRECISA_REGERAR=false;
 var DADOS_VIERAM_DO_ARQUIVO=false;
@@ -1075,6 +1075,8 @@ function regenerar(inicio,dias){
     }
     return podeNoDia(t,t.data);
   });
+
+  tirarRepetidasDoDia();
 
   salvar();
 }
@@ -2448,6 +2450,55 @@ function renderMenu(){
 /* Rede de segurança: roda a cada tela desenhada e tira do lugar errado o que
    quer que tenha sobrado — de versão antiga, de remanejo, de tarefa fixada.
    Não depende de migração nem de recálculo: se está no dia errado, sai. */
+/* ---------------------------------------------------------------------
+   NADA REPETIDO NO MESMO DIA
+   Duas tarefas são "a mesma" quando caem no mesmo dia, são da mesma
+   categoria e apontam para a mesma coisa. Comparar pelo título sozinho
+   seria errado: você tem duas aulas atrasadas de Física de verdade, e
+   elas têm o mesmo nome — por isso, quando a tarefa vem de um item
+   (aula, lista, redação, simulado), o que vale é o item (ref).
+   --------------------------------------------------------------------- */
+function chaveEm(t,dia){
+  var base;
+  if(t.ref) base='ref:'+t.ref;
+  else if(t.cat==='prova_antiga') base='pa:'+grupoDaTarefa(t);
+  else base='tit:'+String(t.titulo||'').trim().toLowerCase().replace(/\s+/g,' ');
+  return dia+'|'+t.cat+'|'+base;
+}
+function chaveNoDia(t){ return chaveEm(t,t.data); }
+
+/* qual das repetidas fica: a já concluída na frente de tudo, depois a que
+   você criou ou fixou no dia, e só então a que o app gerou sozinho */
+function pesoParaFicar(t){
+  if(t.feita) return 3;
+  if(t.manual||t.fixadaPorMim||t.travada) return 2;
+  return 1;
+}
+
+function tirarRepetidasDoDia(){
+  var melhor={}, ordem=[];
+  E.tarefas.forEach(function(t,i){
+    var k=chaveNoDia(t);
+    if(melhor[k]===undefined){ melhor[k]=i; ordem.push(k); return; }
+    if(pesoParaFicar(t)>pesoParaFicar(E.tarefas[melhor[k]])) melhor[k]=i;
+  });
+  if(ordem.length===E.tarefas.length) return false;
+  var fica={};
+  ordem.forEach(function(k){ fica[melhor[k]]=1; });
+  E.tarefas=E.tarefas.filter(function(t,i){ return fica[i]; });
+  return true;
+}
+
+/* já existe algo igual nesse dia? usado para avisar antes de duplicar */
+function jaExisteNoDia(t,ignorarId){
+  var k=chaveNoDia(t), achou=false;
+  E.tarefas.forEach(function(x){
+    if(ignorarId&&x.id===ignorarId) return;
+    if(chaveNoDia(x)===k) achou=true;
+  });
+  return achou;
+}
+
 function sanear(){
   var mudou=false, contagem={}, vistos={};
   var novas=[];
@@ -2472,10 +2523,9 @@ function sanear(){
     if(!podeNoDia(t,t.data)){ mudou=true; return; }
     novas.push(t);
   });
-  if(mudou){
-    E.tarefas=novas;
-    salvar();
-  }
+  if(mudou) E.tarefas=novas;
+  if(tirarRepetidasDoDia()) mudou=true;
+  if(mudou) salvar();
   return mudou;
 }
 
@@ -2818,18 +2868,27 @@ function novaTarefa(diaPadrao){
     var datas=[data];
     if(rep==='semanal'){ datas=[]; for(var i=0;i<semanas;i++) datas.push(somaDias(data,i*7)); }
     if(rep==='diario'){ datas=[]; for(var j=0;j<semanas*7;j++) datas.push(somaDias(data,j)); }
+    var criadas=0, repetidas=0;
     datas.forEach(function(d){
       var t={};
       for(var k in base) t[k]=base[k];
       t.id=id('t'); t.data=d; t.feita=false; t.manual=true; t.travada=true;
       t.assinatura='manual:'+t.id;
+      /* mesma tarefa, mesmo dia: não entra duas vezes */
+      if(jaExisteNoDia(t)){ repetidas++; return; }
       E.tarefas.push(t);
+      criadas++;
     });
     E.tarefas.sort(function(a,b){
       return a.data.localeCompare(b.data)||a.prioridade-b.prioridade;
     });
     salvar(); render();
-    flutuante(datas.length>1 ? datas.length+' tarefas adicionadas.' : 'Tarefa adicionada em '+dataCurta(data)+'.');
+    if(!criadas){
+      flutuante('Essa tarefa já está nesse dia — não dupliquei.');
+    } else {
+      flutuante((criadas>1 ? criadas+' tarefas adicionadas' : 'Tarefa adicionada em '+dataCurta(data))+
+                (repetidas ? ' · '+repetidas+' já existia'+(repetidas>1?'m':'')+' e não repeti.' : '.'));
+    }
   });
 }
 
@@ -2990,11 +3049,14 @@ function baseAssinatura(t){ return String(t.assinatura).split('@')[0]; }
 /* Evita duplicata boba ao remanejar: o Anki atrasado de ontem não deve virar
    um segundo "Anki do dia" num dia que já tem o dele. */
 function jaTemIgual(t,dia){
-  var base=baseAssinatura(t);
+  var base=baseAssinatura(t), chave=chaveEm(t,dia);
   for(var i=0;i<E.tarefas.length;i++){
     var x=E.tarefas[i];
-    if(x.id===t.id||x.feita||x.data!==dia) continue;
+    if(x.id===t.id||x.data!==dia) continue;
+    /* conta também o que já está feito naquele dia: se você já fez, mandar
+       outra igual para lá seria repetir */
     if(baseAssinatura(x)===base) return true;
+    if(chaveNoDia(x)===chave) return true;
   }
   return false;
 }
@@ -3200,8 +3262,11 @@ function moverUmaModal(idt){
     function(){
       var destino=val('f-destino');
       if(!destino) return false;
+      if(destino===t.data){ alert('Ela já está nesse dia.'); return false; }
+      /* nada repetido no mesmo dia: em vez de duplicar, o app avisa */
       if(jaTemIgual(t,destino)){
-        if(!confirm('Já existe uma tarefa igual em '+dataCurta(destino)+'. Mover mesmo assim?')) return false;
+        alert('Em '+dataCurta(destino)+' já existe essa mesma tarefa. Escolha outro dia.');
+        return false;
       }
       moverTarefa(t,destino);
       t.fixadaPorMim=true;
